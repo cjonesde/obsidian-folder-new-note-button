@@ -1,20 +1,50 @@
 'use strict';
 
-const { Notice, Plugin, normalizePath } = require('obsidian');
+const { Notice, Plugin, PluginSettingTab, Setting, Menu, normalizePath } = require('obsidian');
+
+const DEFAULT_SETTINGS = Object.freeze({
+  enableExcalidraw: false,
+});
 
 class FolderNewNoteButtonPlugin extends Plugin {
   constructor(app, manifest) {
     super(app, manifest);
     this.explorerDisposers = new Map();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS);
   }
 
   async onload() {
+    await this.loadSettings();
+    this.addSettingTab(new FolderNewNoteButtonSettingTab(this.app, this));
     this.app.workspace.onLayoutReady(() => this.refreshFileExplorerHandlers());
     this.registerEvent(this.app.workspace.on('layout-change', () => this.refreshFileExplorerHandlers()));
   }
 
   onunload() {
     this.teardownAll();
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  isExcalidrawAvailable() {
+    return this.app.plugins.enabledPlugins.has('obsidian-excalidraw-plugin');
+  }
+
+  getExcalidrawPlugin() {
+    if (!this.isExcalidrawAvailable()) {
+      return null;
+    }
+    return this.app.plugins.plugins['obsidian-excalidraw-plugin'] || null;
+  }
+
+  shouldShowMenu() {
+    return this.settings.enableExcalidraw && this.isExcalidrawAvailable();
   }
 
   refreshFileExplorerHandlers() {
@@ -89,7 +119,12 @@ class FolderNewNoteButtonPlugin extends Plugin {
         return;
       }
       const view = explorerView || this.findExplorerViewForElement(folderTitleEl);
-      this.createNoteInFolder(folderPath, view);
+
+      if (this.shouldShowMenu()) {
+        this.showNewItemMenu(event, folderPath, view);
+      } else {
+        this.createNoteInFolder(folderPath, view);
+      }
     });
   }
 
@@ -217,6 +252,66 @@ class FolderNewNoteButtonPlugin extends Plugin {
     return leaf?.view ?? null;
   }
 
+  showNewItemMenu(event, folderPath, explorerView) {
+    const menu = new Menu();
+
+    menu.addItem((item) => {
+      item
+        .setTitle('New note')
+        .setIcon('file-plus')
+        .onClick(() => {
+          this.createNoteInFolder(folderPath, explorerView);
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle('New Excalidraw drawing')
+        .setIcon('pencil')
+        .onClick(() => {
+          this.createExcalidrawInFolder(folderPath);
+        });
+    });
+
+    menu.showAtMouseEvent(event);
+  }
+
+  async createExcalidrawInFolder(folderPath) {
+    const excalidrawPlugin = this.getExcalidrawPlugin();
+    if (!excalidrawPlugin) {
+      new Notice('Excalidraw plugin is not available.');
+      return;
+    }
+
+    try {
+      const filename = this.generateExcalidrawFilename(excalidrawPlugin.settings);
+      const folderArg = (folderPath === '/' || folderPath === normalizePath('/')) ? '' : folderPath;
+      await excalidrawPlugin.createAndOpenDrawing(filename, 'active-pane', folderArg);
+    } catch (error) {
+      console.error('Folder New Note Button: failed to create Excalidraw drawing', error);
+      new Notice('Could not create Excalidraw drawing in this folder.');
+    }
+  }
+
+  generateExcalidrawFilename(excalidrawSettings) {
+    const prefix = excalidrawSettings?.drawingFilenamePrefix ?? 'Drawing ';
+    const dateTimeFmt = excalidrawSettings?.drawingFilenameDateTime ?? '';
+    const dateTime = dateTimeFmt && window.moment
+      ? window.moment().format(dateTimeFmt)
+      : '';
+
+    let extension;
+    if (excalidrawSettings?.compatibilityMode) {
+      extension = '.excalidraw';
+    } else if (excalidrawSettings?.useExcalidrawExtension) {
+      extension = '.excalidraw.md';
+    } else {
+      extension = '.md';
+    }
+
+    return prefix + dateTime + extension;
+  }
+
   removeButtons(container) {
     container.querySelectorAll('.folder-new-note-button').forEach((button) => button.remove());
   }
@@ -226,6 +321,37 @@ class FolderNewNoteButtonPlugin extends Plugin {
       disposer();
     }
     this.explorerDisposers.clear();
+  }
+}
+
+class FolderNewNoteButtonSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    const excalidrawAvailable = this.plugin.isExcalidrawAvailable();
+
+    new Setting(containerEl)
+      .setName('Excalidraw support')
+      .setDesc(
+        excalidrawAvailable
+          ? 'When enabled, clicking + shows a menu to create a new note or a new Excalidraw drawing.'
+          : 'Install and enable the Excalidraw plugin to use this feature.'
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.enableExcalidraw)
+          .setDisabled(!excalidrawAvailable)
+          .onChange(async (value) => {
+            this.plugin.settings.enableExcalidraw = value;
+            await this.plugin.saveSettings();
+          });
+      });
   }
 }
 
